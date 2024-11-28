@@ -1,0 +1,63 @@
+import json
+import boto3
+
+# Initialize the S3 client
+s3_client = boto3.client('s3')
+
+def list_glacier_objects(s3_uri):
+    """
+    List all objects in the specified S3 URI that are in the Glacier storage class.
+    """
+    bucket_name = s3_uri.split('/')[2]  # Extract the bucket name from the S3 URI
+    prefix = '/'.join(s3_uri.split('/')[3:])  # Extract the prefix from the S3 URI
+    glacier_objects = []
+    paginator = s3_client.get_paginator('list_objects_v2')
+    
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            # Check if the storage class is either 'GLACIER' or 'DEEP_ARCHIVE'
+            if obj.get('StorageClass') in ['GLACIER', 'DEEP_ARCHIVE']:
+                glacier_objects.append(obj['Key'])
+    return glacier_objects
+
+def restore_object(bucket_name, key):
+    """
+    Restore a Glacier object for 28 days. Uses 'Standard' retrieval tier.
+    If the object is already in progress, the function will skip it.
+    """
+    print(f"Initiating restore for: {key}")
+    restore_request = {
+        'Days': 28,  # Number of days the object will be available in Standard storage class
+        'GlacierJobParameters': {'Tier': 'Standard'}  # Choose 'Standard' retrieval tier
+    }
+    try:
+        s3_client.restore_object(Bucket=bucket_name, Key=key, RestoreRequest=restore_request)
+        print(f"Restore initiated for {key}.")
+    except s3_client.exceptions.ObjectAlreadyInActiveTierError:
+        print(f"Object {key} is already restored.")
+    except s3_client.exceptions.ClientError as e:
+        # Skip in-progress files by catching the specific error
+        if 'restoreAlreadyInProgress' in str(e):
+            print(f"Restore already in progress for {key}, skipping.")
+        else:
+            print(f"Failed to restore {key}. Error: {e}")
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda handler for initiating Glacier restoration for a specific S3 URI.
+    """
+    s3_uri = "s3://teraki-data/data-collection/Arsalan/Radar-data-collection/20240908_GM_TCS_Dataset/"
+
+    # Step 1: List all Glacier objects in the specified S3 URI
+    glacier_objects = list_glacier_objects(s3_uri)
+    print(f"Found {len(glacier_objects)} Glacier objects in the specified S3 URI: {s3_uri}")
+
+    # Step 2: Restore all Glacier objects (asynchronously)
+    for key in glacier_objects:
+        restore_object(s3_uri.split('/')[2], key)
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f"Initiated restoration for {len(glacier_objects)} Glacier objects from {s3_uri}.")
+    }
+
